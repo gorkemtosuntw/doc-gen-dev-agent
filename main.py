@@ -12,43 +12,45 @@ import json
 
 load_dotenv()
 
+# API Configurations
 TRELLO_API_KEY = os.getenv("TRELLO_API_KEY")
 TRELLO_TOKEN = os.getenv("TRELLO_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GITHUB_REPO_NAME = "gorkemtosuntw/doc-gen-mvp" # Örn: "ahmet/proje-x"
+GITHUB_REPO_NAME = "gorkemtosuntw/doc-gen-mvp" # Ex: "username/repo-name"
 REPO_URL = f"https://{GITHUB_TOKEN}@github.com/{GITHUB_REPO_NAME}.git"
 
+# Trello Lists & Bot Config
 LIST_IN_PROGRESS = "691d9d7f9faff31f3cc13819" 
 LIST_REVIEW = "691d9d7f9faff31f3cc1381a"
-BOT_USERNAME = "gorkemt1" # Trello'daki bot kullanıcı adı
+BOT_USERNAME = "gorkemt1" # Bot username in Trello
 app = FastAPI()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 def list_files_in_repo(root_dir):
     """
-    Repodaki dosyaların listesini verir (Gereksizleri filtreler).
-    Cost Efficiency için çok önemlidir.
+    Lists files in the repo (Filters out unnecessary ones).
+    Crucial for Cost Efficiency.
     """
     file_list = []
+    # Remove folders to ignore
     ignore_dirs = {".git", "__pycache__", "venv", "env", "node_modules", ".idea", ".vscode", "pnpm-lock.yaml", "yarn.lock", "package-lock.json"}
     
     for root, dirs, files in os.walk(root_dir):
-        # Ignore edilecek klasörleri çıkart
         dirs[:] = [d for d in dirs if d not in ignore_dirs]
         
         for file in files:
-            # Sadece kod dosyalarını al (Resimleri vs alma)
+            # Include only code files (skip images, etc.)
             if file.endswith((".py", ".js", ".ts", ".html", ".css", ".md", ".txt", ".json")):
                 full_path = os.path.join(root, file)
-                # Root path'i silip relative path gösterelim (Token tasarrufu)
+                # Remove root path to show relative path (Token saving)
                 rel_path = os.path.relpath(full_path, root_dir)
                 file_list.append(rel_path)
     
     return "\n".join(file_list)
 
 def read_file_content(root_dir, file_path):
-    """Seçilen dosyanın içeriğini okur."""
+    """Reads the content of the selected file."""
     full_path = os.path.join(root_dir, file_path)
     try:
         with open(full_path, "r", encoding="utf-8") as f:
@@ -67,25 +69,24 @@ def apply_patches(original_content, ai_response):
     success_count = 0
 
     for search_block, replace_block in matches:
-        # --- GÜÇLENDİRİLMİŞ EŞLEŞTİRME ---
-        # 1. Direkt eşleşme dene
+        # --- ENHANCED MATCHING ---
+        # 1. Try direct match
         if search_block in new_content:
             new_content = new_content.replace(search_block, replace_block, 1)
             success_count += 1
             continue
             
-        # 2. Eğer bulamazsan, satır sonlarındaki boşlukları temizleyerek dene (strip)
-        # Bu işlem risklidir, çok dikkatli yapılmalı ama genelde işe yarar.
+        # 2. If not found, try stripping whitespace at line ends. 
+        # This is risky but usually works.
         search_block_stripped = search_block.strip()
         if search_block_stripped in new_content:
              new_content = new_content.replace(search_block_stripped, replace_block, 1)
              success_count += 1
              continue
              
-        # 3. Hala bulamıyorsan, satır satır boşluk temizleyerek ara (Advanced Normalization)
-        # (Burada kod karmaşıklaşır, şimdilik ilk 2 adım %90 sorunu çözer)
+        # 3. If still not found, try advanced normalization (skipping for now, first 2 steps solve 90%)
         
-        print(f"⚠️ UYARI: Search bloğu tam eşleşmedi:\n---\n{search_block}\n---")
+        print(f"⚠️ WARNING: Search block did not match exactly:\n---\n{search_block}\n---")
 
     return new_content, (success_count > 0)
     
@@ -114,57 +115,57 @@ def get_card_details(card_id):
     return resp.json()
 
 def run_smart_agent(root_dir, task_title, task_desc):
-    print(f"🕵️ Smart Agent Analize Başlıyor: {task_title}")
+    print(f"🕵️ Smart Agent Starting Analysis: {task_title}")
     files_tree = list_files_in_repo(root_dir)
     
     system_prompt = f"""
-    Sen uzman bir Full-Stack geliştiricisisin. Mevcut bir kod tabanı üzerinde çalışıyorsun.
+    You are an expert Full-Stack developer. You are working on an existing codebase.
     
-    GÖREVİN:
-    Verilen Task'ı ({task_title}) yerine getirmek için gerekli dosyalarda 'Cerrahi Müdahale' yap.
+    YOUR TASK:
+    Perform 'Surgical Intervention' on the necessary files to fulfill the given Task ({task_title}).
 
-    MEVCUT DOSYALAR:
+    EXISTING FILES:
     {files_tree}
 
-    KURALLAR (ÇOK ÖNEMLİ):
-    1. ASLA tüm dosyayı baştan sona tekrar yazma. Bu yasaktır.
-    2. Sadece değiştirmek istediğin kısımları 'SEARCH/REPLACE' blokları halinde ver.
-    3. Dosya okumak için 'read_file' aracını kullan.
-    4. Hangi dosyanın görevle ilgili olduğunu bul.
-    5. Kodu analiz et ve düzeltilmiş tam halini yaz.
-    6. KOD STİLİ: Dosyanın mevcut indentation yapısına (Tab mı Space mi?) sadık kal. 
-    Eğer dosya 4 space kullanıyorsa sen de 4 space kullan.
-    7. (ÇOK ÖNEMLİ) SESSİZLİK MODU:
-       - Asla "Şöyle yapacağım", "İşte kodunuz", "Bu değişikliği yaptım" gibi açıklamalar yapma.
-       - Çıktın doğrudan ve sadece 'FILE: ...' satırı ile başlamalı.
-       - Başka hiçbir kelime etme.
+    RULES (VERY IMPORTANT):
+    1. NEVER rewrite the whole file from scratch. This is forbidden.
+    2. Only provide the parts you want to change in 'SEARCH/REPLACE' blocks.
+    3. Use the 'read_file' tool to read files.
+    4. Find which file is relevant to the task.
+    5. Analyze the code and write the corrected full version (of the block).
+    6. CODE STYLE: Stick to the file's existing indentation structure (Tab or Space?). 
+       If the file uses 4 spaces, you use 4 spaces.
+    7. (VERY IMPORTANT) SILENCE MODE:
+       - Never make explanations like "I will do this", "Here is your code", "I made this change".
+       - Your output must start directly and only with the 'FILE: ...' line.
+       - Do not say any other words.
 
     FORMAT:
-    Değişiklik yapmak için şu formatı kullanmalısın (kod blokları içinde değil, düz metin olarak):
+    You must use the following format to make changes (as plain text, not inside code blocks):
 
-    FORMAT ÖRNEĞİ:
+    FORMAT EXAMPLE:
     FILE: common/types.ts
     <<<<<<< SEARCH
     interface A {{
-       x: string;
+        x: string;
     }}
     =======
     interface A {{
-       x: string;
-       y: number;
+        x: string;
+        y: number;
     }}
     >>>>>>> REPLACE
     
-    Eğer birden fazla dosyada değişiklik yapacaksan, her biri için FILE: satırını tekrar yaz.
+    If you are making changes in multiple files, write the FILE: line again for each one.
 
-    İPUÇLARI:
-    - 'SEARCH' bloğundaki kod, hedef dosyadakiyle KARAKTERİ KARAKTERİNE aynı olmalı (indentation dahil). Yoksa eşleşme başarısız olur.
-    - Benzersizliği sağlamak için değiştireceğin satırın bir üstündeki ve altındaki satırları da SEARCH bloğuna dahil et.
+    TIPS:
+    - The code in the 'SEARCH' block must match the target file CHARACTER BY CHARACTER (including indentation). Otherwise, the match will fail.
+    - To ensure uniqueness, include the lines above and below the line you are changing in the SEARCH block.
     """
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Task Detayı: {task_desc}. Lütfen gerekiyorsa dosyaları oku ve düzelt."}
+        {"role": "user", "content": f"Task Detail: {task_desc}. Please read files if necessary and fix."}
     ]
 
     tools = [
@@ -172,11 +173,11 @@ def run_smart_agent(root_dir, task_title, task_desc):
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Bir dosyanın içeriğini okur.",
+                "description": "Reads the content of a file.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "file_path": {"type": "string", "description": "Okunacak dosyanın relative yolu (örn: src/main.py)"},
+                        "file_path": {"type": "string", "description": "Relative path of the file to read (e.g., src/main.py)"},
                     },
                     "required": ["file_path"],
                 },
@@ -185,7 +186,7 @@ def run_smart_agent(root_dir, task_title, task_desc):
     ]
 
     for i in range(3): 
-        print(f"🔄 Tur {i+1}/3 çalışıyor...")
+        print(f"🔄 Round {i+1}/3 running...")
         
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -195,19 +196,19 @@ def run_smart_agent(root_dir, task_title, task_desc):
         )
         
         msg = response.choices[0].message
-        messages.append(msg) # Geçmişe ekle (Memory)
+        messages.append(msg) # Add to history (Memory)
 
-        # Eğer Agent bir Tool çağırmak istiyorsa (Örn: Dosya okumak)
+        # If Agent wants to call a Tool (e.g., Read File)
         if msg.tool_calls:
             for tool_call in msg.tool_calls:
                 fn_name = tool_call.function.name
                 fn_args = json.loads(tool_call.function.arguments)
                 
                 if fn_name == "read_file":
-                    print(f"📖 Agent dosya okuyor: {fn_args['file_path']}")
+                    print(f"📖 Agent reading file: {fn_args['file_path']}")
                     content = read_file_content(root_dir, fn_args['file_path'])
                     
-                    # Tool sonucunu AI'ya geri besle
+                    # Feed tool result back to AI
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -215,49 +216,49 @@ def run_smart_agent(root_dir, task_title, task_desc):
                         "content": content
                     })
         else:
-            # Eğer Tool çağırmadıysa, demek ki cevabı (Kodu) buldu.
-            # Cevap içinde kod bloğu var mı bakalım.
+            # If no Tool called, it means the answer (Code) is found.
+            # Check if answer contains code block.
             content = msg.content
             print(content)
             if "FILE:" in content and "<<<<<<< SEARCH" in content:
-                print("💡 Agent çözümü buldu!")
-                return content # Kodu ve açıklamayı döndür
+                print("💡 Agent found the solution!")
+                return content # Return code and explanation
             else:
-                # Kod yoksa, belki daha fazla bilgi istiyordur ama biz zorlayalım.
-                print("⚠️ Agent kod üretmedi, döngü devam ediyor.")
+                # If no code, maybe it needs more info but we force loop continuation or exit.
+                print("⚠️ Agent did not produce code, loop continues.")
     
-    return "Agent bir çözüm üretemedi."
+    return "Agent could not produce a solution."
 
 def run_agent_task(card_id, card_name, card_desc):
-    print(f"🚀 Agent çalışmaya başladı: {card_name}")
+    print(f"🚀 Agent started working: {card_name}")
 
     move_trello_card(card_id, LIST_IN_PROGRESS)
-    # Çalıştığımız dizinin tam yolunu alıyoruz
+    # Get absolute path of current working directory
     base_dir = os.getcwd() 
     workspace_root = os.path.join(base_dir, "workspace")
     
-    # UUID ile unique bir klasör yolu oluştur
+    # Create a unique folder path with UUID
     folder_name = str(uuid.uuid4())
     work_dir = os.path.join(workspace_root, folder_name)
 
-    # Workspace ana klasörü yoksa oluştur
+    # Create workspace root folder if not exists
     if not os.path.exists(workspace_root):
         os.makedirs(workspace_root)
     
-    # Temizlik (Eğer uuid çakışırsa ki zor ihtimal)
+    # Cleanup (In the unlikely event of UUID collision)
     if os.path.exists(work_dir):
         shutil.rmtree(work_dir)
     
     try:
-        # 3. Repoyu Clone'la
-        print(f"📥 Repo çekiliyor: {work_dir}")
+        # 3. Clone Repo
+        print(f"📥 Cloning repo: {work_dir}")
         repo = Repo.clone_from(REPO_URL, work_dir)
 
-        branch_name = f"feature/ticket-{card_id[-5:]}" # Card ID'nin son 5 hanesi
+        branch_name = f"feature/ticket-{card_id[-5:]}" # Last 5 digits of Card ID
         current = repo.create_head(branch_name)
         current.checkout()
 
-        print(f"🤖 AI kodluyor: {card_name}")
+        print(f"🤖 AI is coding: {card_name}")
         generated_code = run_smart_agent(work_dir, card_name, card_desc)
 
         target_file_path = None
@@ -276,41 +277,42 @@ def run_agent_task(card_id, card_name, card_desc):
                                 original_content = content
                                 break
                 if target_file_path: break
+        
         if target_file_path:
-            print(f"🎯 Hedef dosya tespit edildi: {target_file_path}")
+            print(f"🎯 Target file detected: {target_file_path}")
             new_content, applied = apply_patches(original_content, generated_code)
 
             if applied:
                 with open(target_file_path, "w", encoding="utf-8", newline="\n") as f:
                     f.write(new_content)
-                print("✅ Yama başarıyla uygulandı!")
+                print("✅ Patch applied successfully!")
                 repo.index.add([target_file_path])
                 commit_msg = f"Fix: {card_name} (AI Search/Replace)"
             else:
-                print("⚠️ Yama uygulanamadı (Search bloğu eşleşmedi).")
-                commit_msg = "Docs: AI çözüm önerdi ama uygulanamadı."
-                # Yine de AI cevabını log olarak kaydedelim
+                print("⚠️ Patch failed (Search block did not match).")
+                commit_msg = "Docs: AI suggested solution but failed to apply."
+                # Log AI response anyway
                 with open(os.path.join(work_dir, "AI_PATCH_FAILED.md"), "w") as f:
                     f.write(generated_code)
                 repo.index.add(["AI_PATCH_FAILED.md"])
         else:
-            print("⚠️ Hedef dosya bulunamadı veya AI yeni dosya oluşturmak istedi.")
-            # Eğer dosya bulamazsa, belki sıfırdan kod yazmıştır.
-            # Eski mantıkla 'ai_generated.py' oluşturabiliriz.
+            print("⚠️ Target file not found or AI wanted to create a new file.")
+            # If file not found, maybe it wrote code from scratch.
+            # Create 'ai_generated.ts' with old logic.
             filename = "ai_generated_v2.ts"
             with open(os.path.join(work_dir, filename), "w") as f:
-                f.write(generated_code) # Ham cevabı yaz
+                f.write(generated_code) # Write raw response
             repo.index.add([filename])
             commit_msg = f"Feat: {card_name} (New File)"
 
         repo.index.commit(commit_msg)
         origin = repo.remote(name='origin')
         origin.push(branch_name)
-        print("📤 Kod pushlandı.")
+        print("📤 Code pushed.")
 
         g = Github(GITHUB_TOKEN)
         gh_repo = g.get_repo(GITHUB_REPO_NAME)
-        pr_body = f"🤖 **AI Agent PR**\n\n**Görev:** {card_name}\n**İstek:** {card_desc}\n\nAI bu kodu otomatik üretti."
+        pr_body = f"🤖 **AI Agent PR**\n\n**Task:** {card_name}\n**Request:** {card_desc}\n\nAI generated this code automatically."
         pr = gh_repo.create_pull(
             title=f"AI Feat: {card_name}",
             body=pr_body,
@@ -318,16 +320,16 @@ def run_agent_task(card_id, card_name, card_desc):
             base="main"
         )
 
-        add_comment_trello(card_id, f"✅ Geliştirme tamamlandı! PR Linki: {pr.html_url}")
+        add_comment_trello(card_id, f"✅ Development complete! PR Link: {pr.html_url}")
         move_trello_card(card_id, LIST_REVIEW)
-        print("🏁 Süreç başarıyla bitti.")
+        print("🏁 Process finished successfully.")
 
     except Exception as e:
-        print(f"❌ HATA OLUŞTU: {e}")
-        add_comment_trello(card_id, f"⚠️ Bir hata oluştu: {str(e)}")
+        print(f"❌ ERROR OCCURRED: {e}")
+        add_comment_trello(card_id, f"⚠️ An error occurred: {str(e)}")
 
     finally:
-        # Windows temizlik kodu
+        # Windows cleanup code
         try:
             if os.path.exists(work_dir):
                 def on_rm_error(func, path, exc_info):
@@ -353,19 +355,19 @@ async def trello_webhook(request: Request, background_tasks: BackgroundTasks):
                 card_id = card_data.get('id')
                 card_name = card_data.get('name')
 
-                # Kartın detaylı açıklamasını almak için API çağrısı yapalım
+                # Call API to get detailed card description
                 full_card = get_card_details(card_id)
                 card_desc = full_card.get('desc', '')
 
                 background_tasks.add_task(run_agent_task, card_id, card_name, card_desc)
-                print(f"Request alındı, işlem sıraya kondu: {card_name}")
+                print(f"Request received, task queued: {card_name}")
 
         return {"status": "ok"}        
     except Exception as e:
-        print(f"Webhook Hatası: {e}")
+        print(f"Webhook Error: {e}")
         return {"status": "error"}
 
 @app.head("/webhook")
 async def trello_webhook_check():
-    """Trello webhook'u ilk kurarken HEAD isteği atar, buna OK dönmek şarttır."""
+    """Trello sends HEAD request when setting up webhook initially, must return OK."""
     return {"status": "ok"}
